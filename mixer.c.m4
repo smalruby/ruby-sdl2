@@ -435,6 +435,171 @@ static VALUE Channels_s_expire(VALUE self, VALUE channel, VALUE ticks)
     return Qnil;
 }
 
+/* --- Pitch shift effect using Mix_RegisterEffect --- */
+
+#define MAX_PITCH_CHANNELS 32
+
+typedef struct {
+    double speed;         /* playback speed (pitch ratio), 1.0 = normal */
+    double position;      /* fractional sample position in source chunk */
+    Sint16 *chunk_data;   /* pointer to the chunk's decoded PCM data */
+    int chunk_frames;     /* total frames in the chunk */
+    int chunk_channels;   /* channels in chunk (1 or 2) */
+    int done;             /* 1 if playback reached end */
+} PitchShiftData;
+
+static PitchShiftData pitch_data[MAX_PITCH_CHANNELS];
+
+static void pitch_effect_callback(int channel, void *stream, int len, void *udata)
+{
+    PitchShiftData *data = (PitchShiftData *)udata;
+    if (!data || data->speed == 1.0 || !data->chunk_data) {
+        return;
+    }
+
+    int out_channels = data->chunk_channels;
+    Sint16 *buf = (Sint16 *)stream;
+    int out_frames = len / (sizeof(Sint16) * out_channels);
+
+    /* If already done, silence the entire buffer to prevent original chunk
+       data from leaking through at normal pitch */
+    if (data->done) {
+        memset(stream, 0, len);
+        return;
+    }
+
+    double pos = data->position;
+    double speed = data->speed;
+    int src_frames = data->chunk_frames;
+    Sint16 *src = data->chunk_data;
+
+    int i;
+    for (i = 0; i < out_frames; i++) {
+        int src_idx = (int)pos;
+        double frac = pos - src_idx;
+
+        if (src_idx >= src_frames - 1) {
+            /* Past end of chunk: silence the rest and mark done */
+            int j, c;
+            for (j = i; j < out_frames; j++) {
+                for (c = 0; c < out_channels; c++) {
+                    buf[j * out_channels + c] = 0;
+                }
+            }
+            data->done = 1;
+            break;
+        } else {
+            /* Linear interpolation from chunk's PCM data */
+            int c;
+            for (c = 0; c < out_channels; c++) {
+                Sint16 s1 = src[src_idx * out_channels + c];
+                Sint16 s2 = src[(src_idx + 1) * out_channels + c];
+                buf[i * out_channels + c] = (Sint16)(s1 + frac * (s2 - s1));
+            }
+        }
+        pos += speed;
+    }
+
+    data->position = pos;
+}
+
+static void pitch_effect_done(int channel, void *udata)
+{
+    PitchShiftData *data = (PitchShiftData *)udata;
+    if (data) {
+        data->position = 0;
+        data->done = 0;
+        if (data->chunk_data) {
+            free(data->chunk_data);
+            data->chunk_data = NULL;
+        }
+    }
+}
+
+/*
+ * @overload set_pitch(channel, pitch)
+ *   Set the pitch (playback speed) of a channel using Mix_RegisterEffect.
+ *
+ *   A pitch of 1.0 is normal speed, 2.0 is double speed (one octave up),
+ *   0.5 is half speed (one octave down).
+ *
+ *   @param channel [Integer] the channel to set pitch for (0-31)
+ *   @param pitch [Float] the pitch ratio (0.1 to 4.0)
+ *   @return [nil]
+ */
+/*
+ * @overload play_pitched(channel, chunk, pitch, loops=0)
+ *   Play a Chunk on a channel with pitch shifting.
+ *
+ *   Instead of setting pitch separately, this method combines play + pitch
+ *   because the effect callback needs access to the chunk's PCM data.
+ *
+ *   @param channel [Integer] the channel to play on (0-31)
+ *   @param chunk [SDL2::Mixer::Chunk] the chunk to play
+ *   @param pitch [Float] pitch ratio (1.0 = normal, 2.0 = octave up)
+ *   @param loops [Integer] number of loops (0 = play once, -1 = infinite)
+ *   @return [Integer] the channel used
+ */
+static VALUE Channels_s_play_pitched(int argc, VALUE *argv, VALUE self)
+{
+    VALUE channel, chunk, pitch, loops;
+    rb_scan_args(argc, argv, "31", &channel, &chunk, &pitch, &loops);
+
+    int ch = NUM2INT(channel);
+    double p = NUM2DBL(pitch);
+    int lp = (loops == Qnil) ? 0 : NUM2INT(loops);
+
+    if (ch < 0 || ch >= MAX_PITCH_CHANNELS)
+        rb_raise(rb_eArgError, "channel %d out of range (0-%d)", ch, MAX_PITCH_CHANNELS - 1);
+
+    Mix_Chunk *mc = Get_Mix_Chunk(chunk);
+
+    /* Unregister previous effect if any */
+    Mix_UnregisterEffect(ch, pitch_effect_callback);
+
+    /* Free previous chunk_data copy */
+    if (pitch_data[ch].chunk_data) {
+        free(pitch_data[ch].chunk_data);
+        pitch_data[ch].chunk_data = NULL;
+    }
+
+    /* Protect chunk from GC while playing */
+    protect_playing_chunk_from_gc(ch, chunk);
+
+    if (p == 1.0) {
+        /* Normal playback, no effect needed */
+        int result = Mix_PlayChannel(ch, mc, lp);
+        HANDLE_MIX_ERROR(result);
+        return INT2NUM(result);
+    }
+
+    /* Query audio format to determine channels */
+    int frequency, mix_channels;
+    Uint16 format;
+    Mix_QuerySpec(&frequency, &format, &mix_channels);
+
+    /* Copy chunk PCM data */
+    int bytes_per_sample = sizeof(Sint16) * mix_channels;
+    int total_frames = mc->alen / bytes_per_sample;
+
+    pitch_data[ch].speed = p;
+    pitch_data[ch].position = 0;
+    pitch_data[ch].done = 0;
+    pitch_data[ch].chunk_channels = mix_channels;
+    pitch_data[ch].chunk_frames = total_frames;
+    pitch_data[ch].chunk_data = (Sint16 *)malloc(mc->alen);
+    if (pitch_data[ch].chunk_data) {
+        memcpy(pitch_data[ch].chunk_data, mc->abuf, mc->alen);
+    }
+
+    /* Register effect and play */
+    HANDLE_MIX_ERROR(Mix_RegisterEffect(ch, pitch_effect_callback,
+                                         pitch_effect_done, &pitch_data[ch]));
+    int result = Mix_PlayChannel(ch, mc, lp);
+    HANDLE_MIX_ERROR(result);
+    return INT2NUM(result);
+}
+
 /*
  * @overload fade_out(channel, ms)
  *   Halt playing of a specified channel with fade-out effect.
@@ -1169,6 +1334,7 @@ void rubysdl2_init_mixer(void)
     rb_define_module_function(mChannels, "resume", Channels_s_resume, 1);
     rb_define_module_function(mChannels, "halt", Channels_s_halt, 1);
     rb_define_module_function(mChannels, "expire", Channels_s_expire, 2);
+    rb_define_module_function(mChannels, "play_pitched", Channels_s_play_pitched, -1);
     rb_define_module_function(mChannels, "fade_out", Channels_s_fade_out, 2);
     rb_define_module_function(mChannels, "play?", Channels_s_play_p, 1);
     rb_define_module_function(mChannels, "pause?", Channels_s_pause_p, 1);
