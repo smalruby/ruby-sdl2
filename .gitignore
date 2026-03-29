@@ -1,5 +1,6 @@
 *.o
 *.bundle
+*.dSYM/
 *~
 Makefile
 *.so
