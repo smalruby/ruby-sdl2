@@ -25,3 +25,5 @@ doc/doc-*
 doc/po/rubysdl2.pot
 extconf-options.txt
 .gem_rbs_collection/
+Gemfile.lock
+.ruby-version
