@@ -1342,23 +1342,10 @@ static VALUE Renderer_present(VALUE self)
  * @overload read_pixels(rect, format)
  *   Read pixels from the current rendering target.
  *
- *   This is a very slow operation and should not be used frequently.
- *   Call this after rendering but before {#present}.
- *
- *   @param rect [SDL2::Rect, nil] the area to read (nil for the entire target)
- *   @param format [SDL2::PixelFormat, Integer] the desired pixel format
+ *   @param [SDL2::Rect,nil] rect the area to read, or nil for the entire target
+ *   @param [SDL2::PixelFormat,Integer] format the desired pixel format
  *     (0 to use the format of the rendering target)
  *   @return [String] raw pixel data as a binary string
- *
- *   @example Read the entire screen in the rendering target's native format
- *     pixels = renderer.read_pixels(nil, 0)
- *
- *   @example Read a sub-region in ARGB8888
- *     rect = SDL2::Rect.new(10, 10, 100, 100)
- *     pixels = renderer.read_pixels(rect, SDL2::PixelFormat::ARGB8888)
- *
- *   @raise [SDL2::Error] raised on failure
- *   @see https://wiki.libsdl.org/SDL2/SDL_RenderReadPixels SDL_RenderReadPixels
  */
 static VALUE Renderer_read_pixels(VALUE self, VALUE rect, VALUE format)
 {
@@ -1366,7 +1353,6 @@ static VALUE Renderer_read_pixels(VALUE self, VALUE rect, VALUE format)
     SDL_Rect sdl_rect;
     SDL_Rect* rect_ptr = NULL;
     Uint32 fmt = uint32_for_format(format);
-    Uint32 pitch_fmt;
     int w, h, pitch;
     void* pixels;
     VALUE result;
@@ -1380,18 +1366,14 @@ static VALUE Renderer_read_pixels(VALUE self, VALUE rect, VALUE format)
         HANDLE_ERROR(SDL_GetRendererOutputSize(renderer, &w, &h));
     }
 
-    /* When fmt is 0 SDL uses the rendering target's format, so we need
-       to query it to calculate the correct pitch and buffer size. */
     if (fmt == 0) {
         SDL_RendererInfo info;
         HANDLE_ERROR(SDL_GetRendererInfo(renderer, &info));
-        pitch_fmt = (info.num_texture_formats > 0)
-            ? info.texture_formats[0] : SDL_PIXELFORMAT_ARGB8888;
+        pitch = w * SDL_BYTESPERPIXEL(info.texture_formats[0]);
     } else {
-        pitch_fmt = fmt;
+        pitch = w * SDL_BYTESPERPIXEL(fmt);
     }
 
-    pitch = w * SDL_BYTESPERPIXEL(pitch_fmt);
     pixels = ruby_xmalloc(pitch * h);
 
     if (SDL_RenderReadPixels(renderer, rect_ptr, fmt, pixels, pitch) < 0) {
