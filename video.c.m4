@@ -126,6 +126,8 @@ static VALUE DisplayMode_s_allocate(VALUE klass)
 {
     SDL_DisplayMode* mode;
     VALUE obj = TypedData_Make_Struct(klass, SDL_DisplayMode, &SDL_DisplayMode_data_type, mode);
+    mode->format = mode->w = mode->h = mode->refresh_rate = 0;
+    mode->driverdata = NULL;
     return obj;
 }
 
@@ -246,6 +248,7 @@ VALUE Surface_new(SDL_Surface* surface)
     Surface* s;
     VALUE obj = TypedData_Make_Struct(cSurface, Surface, &Surface_data_type, s);
     s->surface = surface;
+    s->need_to_free_pixels = 0;
     return obj;
 }
 
@@ -2558,6 +2561,7 @@ static VALUE Rect_s_allocate(VALUE klass)
 {
     SDL_Rect* rect;
     VALUE obj = TypedData_Make_Struct(klass, SDL_Rect, &SDL_Rect_data_type, rect);
+    rect->x = rect->y = rect->w = rect->h = 0;
     return obj;
 }
 
@@ -2661,8 +2665,7 @@ static VALUE Rect_union(VALUE self, VALUE other)
 static VALUE Point_s_allocate(VALUE klass)
 {
     SDL_Point* point;
-    VALUE obj = TypedData_Make_Struct(klass, SDL_Point, &SDL_Point_data_type, point);
-    return obj;
+    return TypedData_Make_Struct(klass, SDL_Point, &SDL_Point_data_type, point);
 }
 
 /*
